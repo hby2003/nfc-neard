@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
+#include <ctype.h>
 
 #include <glib.h>
 
@@ -342,6 +343,7 @@ static gboolean property_get_type(const GDBusPropertyTable *property,
 	case RECORD_TYPE_WKT_ERROR:
 	case RECORD_TYPE_UNKNOWN:
 	case RECORD_TYPE_ERROR:
+	default:
 		type = NULL;
 		break;
 
@@ -409,7 +411,10 @@ static const char *get_text_payload(const GDBusPropertyTable *property,
 	if (!strcmp(property->name, "Encoding"))
 		return text->encoding;
 	else if (!strcmp(property->name, "Language"))
-		return text->language_code;
+		if (!text->language_code)
+			return "en";
+		else
+			return text->language_code;
 	else if (!strcmp(property->name, "Representation"))
 		return text->data;
 	else
@@ -877,6 +882,8 @@ static enum record_type get_external_record_type(uint8_t *type,
 static enum record_type get_record_type(enum record_tnf tnf,
 				uint8_t *type, size_t type_length)
 {
+	unsigned int i;
+
 	DBG("");
 
 	switch (tnf) {
@@ -887,6 +894,10 @@ static enum record_type get_record_type(enum record_tnf tnf,
 		break;
 
 	case RECORD_TNF_WELLKNOWN:
+		for (i = 0; i < type_length; i++)
+			if (!isprint(type[i]))
+				return RECORD_TYPE_ERROR;
+
 		if (type_length == 1) {
 			if (type[0] == 'T')
 				return RECORD_TYPE_WKT_TEXT;
@@ -923,7 +934,8 @@ static enum record_type get_record_type(enum record_tnf tnf,
 			else
 				return RECORD_TYPE_UNKNOWN;
 
-		}
+		} else
+			return RECORD_TYPE_UNKNOWN;
 
 	case RECORD_TNF_MIME:
 		return RECORD_TYPE_MIME_TYPE;
@@ -1137,8 +1149,10 @@ static struct near_ndef_text_payload *
 parse_text_payload(uint8_t *payload, uint32_t length)
 {
 	struct near_ndef_text_payload *text_payload = NULL;
-	uint8_t status, lang_length;
+	uint8_t status, lang_length, len;
+	char *g_str, *txt;
 	uint32_t offset;
+	gboolean valid;
 
 	DBG("");
 
@@ -1173,9 +1187,26 @@ parse_text_payload(uint8_t *payload, uint32_t length)
 
 	offset += lang_length;
 
-	if ((length - lang_length - 1) > 0) {
-		text_payload->data = g_strndup((char *)(payload + offset),
-					length - lang_length - 1);
+	len = length - lang_length - 1;
+
+	if (len > 0) {
+		txt = (char *)(payload + offset);
+
+		if (status)
+			g_str = g_utf16_to_utf8((gunichar2 *)txt, len, NULL,
+						NULL, NULL);
+		else
+			g_str = txt;
+
+		valid = g_utf8_validate(g_str, len, NULL);
+
+		if (status)
+			g_free(g_str);
+
+		if (!valid)
+			goto fail;
+
+		text_payload->data = g_strndup(txt, len);
 	} else {
 		text_payload->data = NULL;
 	}
@@ -2833,7 +2864,6 @@ GList *near_ndef_parse_msg(uint8_t *ndef_data, size_t ndef_length,
 		case RECORD_TYPE_WKT_COLLISION_RESOLUTION:
 		case RECORD_TYPE_WKT_ERROR:
 		case RECORD_TYPE_UNKNOWN:
-		case RECORD_TYPE_ERROR:
 			break;
 
 		case RECORD_TYPE_WKT_HANDOVER_REQUEST:
@@ -2915,6 +2945,8 @@ GList *near_ndef_parse_msg(uint8_t *ndef_data, size_t ndef_length,
 				goto fail;
 
 			break;
+		case RECORD_TYPE_ERROR:
+			goto fail;
 		}
 
 		record->data_len = record->header->header_len +

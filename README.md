@@ -3,7 +3,7 @@
 This is for nfc neard.
 
 The original git is:
-git clone git://git.kernel.org/pub/scm/network/nfc/neard.git
+git clone https://git.kernel.org/pub/scm/network/nfc/neard.git
 
 You can find this project follow this:
 https://01.org/zh/linux-nfc/getting-source

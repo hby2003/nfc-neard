@@ -152,7 +152,7 @@ static void rf_mode_changed(struct near_adapter *adapter)
 					NFC_ADAPTER_INTERFACE, "Mode");
 }
 
-static int adapter_start_poll(struct near_adapter *adapter)
+int __near_adapter_start_poll(struct near_adapter *adapter)
 {
 	int err;
 	uint32_t im_protos, tm_protos;
@@ -358,6 +358,9 @@ static DBusMessage *start_poll_loop(DBusConnection *conn,
 		return __near_error_failed(msg, ENODEV);
 	}
 
+	if (g_hash_table_size(adapter->tags) > 0)
+		return __near_error_failed(msg, EBUSY);
+
 	dbus_message_get_args(msg, NULL, DBUS_TYPE_STRING, &dbus_mode,
 							DBUS_TYPE_INVALID);
 
@@ -372,7 +375,7 @@ static DBusMessage *start_poll_loop(DBusConnection *conn,
 	else
 		adapter->poll_mode = NEAR_ADAPTER_MODE_INITIATOR;
 
-	err = adapter_start_poll(adapter);
+	err = __near_adapter_start_poll(adapter);
 	if (err < 0)
 		return __near_error_failed(msg, -err);
 
@@ -430,7 +433,7 @@ static gboolean check_presence(gpointer user_data)
 out_err:
 	near_adapter_disconnect(adapter->idx);
 	if (adapter->constant_poll)
-		adapter_start_poll(adapter);
+		__near_adapter_start_poll(adapter);
 
 	return FALSE;
 }
@@ -444,7 +447,7 @@ static gboolean dep_timer(gpointer user_data)
 	if (!adapter)
 		return FALSE;
 
-	adapter_start_poll(adapter);
+	__near_adapter_start_poll(adapter);
 
 	return FALSE;
 }
@@ -466,7 +469,7 @@ static void tag_present_cb(uint32_t adapter_idx, uint32_t target_idx,
 
 		near_adapter_disconnect(adapter->idx);
 		if (adapter->constant_poll)
-			adapter_start_poll(adapter);
+			__near_adapter_start_poll(adapter);
 
 		return;
 	}
@@ -505,8 +508,10 @@ void __near_adapter_stop_check_presence(uint32_t adapter_idx,
 	if (!adapter)
 		return;
 
-	if (adapter->presence_timeout > 0)
+	if (adapter->presence_timeout > 0) {
 		g_source_remove(adapter->presence_timeout);
+		adapter->presence_timeout = 0;
+	}
 }
 
 static const GDBusMethodTable adapter_methods[] = {
@@ -573,6 +578,11 @@ void __near_adapter_destroy(struct near_adapter *adapter)
 	free_adapter(adapter);
 }
 
+bool __near_adapter_is_constant_poll(struct near_adapter *adapter)
+{
+	return adapter->constant_poll;
+}
+
 const char *__near_adapter_get_path(struct near_adapter *adapter)
 {
 	return adapter->path;
@@ -601,7 +611,7 @@ int __near_adapter_set_dep_state(uint32_t idx, bool dep)
 		 * that very moment. In this case we need to try polling later
 		 * again, so constant polling will work properly.
 		 */
-		if(adapter_start_poll(adapter) == -EBUSY) {
+		if(__near_adapter_start_poll(adapter) == -EBUSY) {
 			near_error("Adapter is busy, retry polling later");
 			g_timeout_add_seconds(1, dep_timer, adapter);
 		}
@@ -613,8 +623,10 @@ int __near_adapter_set_dep_state(uint32_t idx, bool dep)
 		target_idx =  __neard_device_get_idx(adapter->device_link);
 		__near_adapter_remove_target(idx, target_idx);
 	} else {
-		if (adapter->dep_timer > 0)
+		if (adapter->dep_timer > 0) {
 			g_source_remove(adapter->dep_timer);
+			adapter->dep_timer = 0;
+		}
 
 		if (!__near_device_register_interface(adapter->device_link))
 			return -ENODEV;
@@ -681,7 +693,7 @@ static void tag_read_cb(uint32_t adapter_idx, uint32_t target_idx, int status)
 	if (status < 0) {
 		near_adapter_disconnect(adapter->idx);
 		if (adapter->constant_poll)
-			adapter_start_poll(adapter);
+			__near_adapter_start_poll(adapter);
 
 		return;
 	}
@@ -710,7 +722,7 @@ static void device_read_cb(uint32_t adapter_idx, uint32_t target_idx,
 		}
 
 		if (adapter->constant_poll)
-			adapter_start_poll(adapter);
+			__near_adapter_start_poll(adapter);
 
 		return;
 	}
@@ -831,7 +843,7 @@ int __near_adapter_add_target(uint32_t idx, uint32_t target_idx,
 					iso15693_uid_len, iso15693_uid);
 
 	if (ret < 0 && adapter->constant_poll)
-		adapter_start_poll(adapter);
+		__near_adapter_start_poll(adapter);
 
 	return ret;
 }
@@ -872,7 +884,7 @@ static gboolean poll_error(gpointer user_data)
 		 __near_netlink_adapter_enable(adapter->idx, true);
 	}
 
-	adapter_start_poll(adapter);
+	__near_adapter_start_poll(adapter);
 
 	return FALSE;
 }
@@ -947,7 +959,7 @@ int __near_adapter_remove_device(uint32_t idx)
 	adapter->dep_up = false;
 
 	if (adapter->constant_poll)
-		adapter_start_poll(adapter);
+		__near_adapter_start_poll(adapter);
 
 	return 0;
 }
@@ -1044,7 +1056,7 @@ int near_adapter_connect(uint32_t idx, uint32_t target_idx, uint8_t protocol)
 
 	sock = socket(AF_NFC, SOCK_SEQPACKET, NFC_SOCKPROTO_RAW);
 	if (sock == -1)
-		return sock;
+		return -errno;
 
 	addr.sa_family = AF_NFC;
 	addr.dev_idx = idx;
@@ -1054,7 +1066,7 @@ int near_adapter_connect(uint32_t idx, uint32_t target_idx, uint8_t protocol)
 	err = connect(sock, (struct sockaddr *) &addr, sizeof(addr));
 	if (err) {
 		close(sock);
-		return err;
+		return -errno;
 	}
 
 	adapter->tag_sock = sock;
